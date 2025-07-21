@@ -3,6 +3,13 @@
 
 /**FBAProcessor Class Definition**/
 
+constexpr double INTEGRATION_STEP_H = 1;   // Δt 
+
+// Utility: controlla se la stringa s termina con il suffisso suffix
+static bool endsWith(const std::string& s, const std::string& suffix) {
+    if (suffix.size() > s.size()) return false;
+    return std::equal(suffix.rbegin(), suffix.rend(), s.rbegin());
+}
 
 /**
  * @class FBAProcessor
@@ -68,6 +75,7 @@ class FBAProcessor {
             mapReactionsFromProblems(vec_fluxb);
             loadAndApplyFBAReactionUpperBounds(vec_fluxb, "EX_upper_bounds_FBA.csv");
             updateNonFBAReactionUpperBoundsFromFile(vec_fluxb, "EX_upper_bounds_nonFBA.csv");
+            loadMuMaxValues(vec_fluxb);
             loadGeneRules(vec_fluxb, "GeneRules.txt");
             debugPrintGeneRules();
             firstTransitionName = NameTrans[T];
@@ -135,6 +143,7 @@ class FBAProcessor {
             return h1;
         }
     };
+
     // Se vuoi un comparator personalizzato (ma di solito la pair ha già operator==)
     struct PairEq {
         bool operator()(const std::pair<std::string, size_t>& a,
@@ -142,6 +151,14 @@ class FBAProcessor {
             return (a.first == b.first && a.second == b.second);
         }
     };
+    
+		 // generic hash for <string,size_t>
+		struct RxnLPHash {
+				std::size_t operator()(const std::pair<std::string,std::size_t>& p) const noexcept {
+				    return std::hash<std::string>()(p.first) ^ (p.second * 0x9e3779b97f4a7c15ULL);
+				}
+		};
+
      set<string> reactionsToUpdate;
      string firstTransitionName = ""; // Tracks problems associated with dead bacterial species
      unordered_map<size_t, bool> deadBacterialSpecies; // Tracks problems associated with dead bacterial species
@@ -161,6 +178,15 @@ class FBAProcessor {
         PairHash,
         PairEq
     > NonFBAReactionBaseUB;
+    
+		std::unordered_map<
+				std::pair<std::string,std::size_t>,
+				std::string,
+				PairHash,
+				PairEq
+		> ReactionSubtype;         // "exchange" | "internal"
+		
+	
     unordered_map<string, unordered_set<size_t>> reactionToFileMap; // Maps each reaction to a set of files where it appears
 
     unordered_map<int, double> bacteriaToBioMin; // Maps each reaction to a set of files where it appears
@@ -280,6 +306,10 @@ class FBAProcessor {
      * This helps optimize the processing by updating only relevant LP problems when specific metabolite concentrations change.
      */
     unordered_map<string, set<size_t>> metaboliteToProblems;
+
+		/*Max possible flux value**/
+		std::unordered_map<std::size_t,double> muMaxMap;
+
 
     std::vector<GeneRule> geneRules;
     bool geneRulesLoaded;
@@ -460,41 +490,52 @@ class FBAProcessor {
     }
 
 
-    /**
-     * Recalculates the multiplicative constant for the specified transition based on the accessibility of each species to a metabolite.
-     * The constant is computed based on the sum of the products of biomass mean and bacterial count across all relevant species.
-     * @param transition The transition for which the constant is being recalculated.
-     * @param reactionToFileMap Mapping of reactions to the problems that contain these reactions.
-     * @param bacteriaToBioMean Mapping from problem index to mean biomass for that problem.
-     * @param problemBacteriaPlace Mapping from problem index to the bacteria count place.
-     * @param problemBiomassPlace Mapping from problem index to the biomass place.
-     * @param NumPlaces Mapping of place names to their corresponding indices in the metabolic array.
-     * @param Value Pointer to the array containing current metabolic values.
-     */
-    void calculateMultiplicativeConstant(double* Value, const map<string, int>& NumPlaces, size_t problemIndex, string reaction) {
-        double denominator = 0;
-        double numerator = 0;
+		// -------------------------------------------------------------
+		// λm  = 1 / Σk ( xB,k · xN,k · 10-12 )
+		//       = 1e12 / Σk ( xB,k · xN,k )   [ xB in pgDW/cell ]
+		//
+		// moltiplicativeConstant  ≔ λm               (usato in updateFluxBounds)
+		// -------------------------------------------------------------
+		void calculateMultiplicativeConstant(double*                      Value,
+				                                 const std::map<std::string,int>& NumPlaces,
+				                                 std::size_t                   problemIndex,
+				                                 const std::string&            reaction,
+				                                 vector<class FBGLPK::LPprob>& vec_fluxb )
+		{
+				double denom_pgDWcell = 0.0;      // Σ xB,k · xN,k   (pgDW)
+				const auto& lpSet =
+				    reactionToFileMap.count(reaction) ?  reactionToFileMap.at(reaction)
+				                                      : std::unordered_set<std::size_t>{problemIndex};
 
-        if (reactionToFileMap.find(reaction) != reactionToFileMap.end()) {
-            const auto& problems = reactionToFileMap.at(reaction);
-            for (const auto& problem : problems) {
-                double numIndividuals = floor(Value[NumPlaces.at(problemBacteriaPlace.at(problem))]);
-                denominator += numIndividuals;  // Accumulate total number of individuals for active problems
-            }
+				std::cout << "\n[λ-DEBUG] reaction = " << reaction << '\n';
+				std::cout << "model\tcells(xN)\txB(pgDW)\txB·xN\n";
 
-            double transitionCurrentBiomass = Value[NumPlaces.at(problemBiomassPlace.at(problemIndex))];
-            double transitionBioMean = bacteriaToBioMean.at(problemIndex);
+				/* -------- ① somma di tutte le biomasse coinvolte -------- */
+				for (auto prob : lpSet)
+				{
+				    long   xN = std::lround( std::floor(
+				                 Value[ NumPlaces.at( problemBacteriaPlace.at(prob) ) ] ));
+				    double xB = Value[ NumPlaces.at( problemBiomassPlace.at(prob) ) ];     // pgDW/cell
 
-            denominator *= transitionBioMean;  // Adjust denominator by the biomass mean of the transition problem
-            numerator = transitionCurrentBiomass;  // Use current biomass of the transition problem as numerator
-        }
+				    denom_pgDWcell += xB * static_cast<double>(xN);
 
-        if (denominator > 0) {
-            multiplicativeConstant = trunc(numerator * floor(Value[NumPlaces.at(problemBacteriaPlace.at(problemIndex))]) / denominator, decimalTrunc);  // Calculate multiplicative constant
-        } else {
-            multiplicativeConstant = 0;  // Handle case where denominator is zero
-        }
-    }
+				    std::cout << vec_fluxb[prob].getFilename() << '\t'
+				              << xN   << '\t'
+				              << xB   << '\t'
+				              << xB * static_cast<double>(xN) << '\n';
+				}
+
+				/* -------- ② λ  -------- */
+				if (denom_pgDWcell > 0.0)
+				    multiplicativeConstant = trunc( 1e12 / denom_pgDWcell, decimalTrunc );
+				else
+				    multiplicativeConstant = 0.0;
+
+				std::cout << "Σ xB·xN = " << denom_pgDWcell
+				          << "  ⇒  λ = "  << multiplicativeConstant
+				          << "  [mL/(gDW·h)]\n";
+		}
+
 
 
     /**
@@ -531,20 +572,61 @@ class FBAProcessor {
     }
 
 
-    /**
-     * Finds the index of a linear programming problem associated with a given filename within a vector of LP problems.
-     * @param vec_fluxb A vector containing LP problems.
-     * @param lpFile The filename associated with the LP problem.
-     * @return The index of the LP problem in the vector or max size if not found.
-     */
-    size_t findLPIndex(const vector<class FBGLPK::LPprob>& vec_fluxb, const string& lpFile) {
-        for (size_t i = 0; i < vec_fluxb.size(); ++i) {
-            if (vec_fluxb[i].getFilename() == lpFile) {
-                return i;
-            }
+// ── helper: to‑lower utility
+static std::string toLower(std::string s)
+{
+    std::transform(s.begin(), s.end(), s.begin(),
+                   [](unsigned char c){ return std::tolower(c); });
+    return s;
+}
+
+// ── helper: build abbreviation (“cbd” from “Clostridium_butyricum_DSM_10702”)
+static std::string modelAbbrev(const std::string& model)
+{
+    std::string abbr;
+    bool newToken = true;
+    for (char c : model) {
+        if (std::isalpha(c)) {
+            if (newToken) abbr += std::tolower(c);
+            newToken = false;
+        } else {
+            newToken = true;          // hit '_' or digit etc. → next char starts a token
         }
-        return numeric_limits<size_t>::max();
     }
+    return abbr;
+}
+
+// ──────────────────────────────────────────────────────────────
+// smarter LP lookup: exact filename  ►  base‑name match  ►  abbreviation
+// ──────────────────────────────────────────────────────────────
+size_t findLPIndex(const std::vector<FBGLPK::LPprob>& vec_fluxb,
+                                 const std::string& modelName) const
+{
+    // 1) exact match (unchanged behaviour)
+    for (size_t i = 0; i < vec_fluxb.size(); ++i)
+        if (vec_fluxb[i].getFilename() == modelName)
+            return i;
+
+    // 2) compare against base name (filename without extension, case‑insensitive)
+    std::string target = toLower(modelName);
+    for (size_t i = 0; i < vec_fluxb.size(); ++i) {
+        std::string base = vec_fluxb[i].getFilename();
+        base = base.substr(0, base.find_last_of('.'));   // strip extension
+        if (toLower(base) == target) return i;
+    }
+
+    // 3) compare abbreviation with beginning of base name
+    std::string abbr = modelAbbrev(modelName);
+    for (size_t i = 0; i < vec_fluxb.size(); ++i) {
+        std::string base = vec_fluxb[i].getFilename();
+        base = base.substr(0, base.find_last_of('.'));
+        base = toLower(base);
+        if (base.find(abbr) == 0)        // base starts with abbreviation
+            return i;
+    }
+
+    return std::numeric_limits<size_t>::max();           // not found
+}
 
 
 /**
@@ -563,72 +645,68 @@ static std::string standardizeReactionName(
     const std::map<std::string, unsigned int>& forwardMap,
     const std::map<std::string, unsigned int>& reverseMap,
     const std::map<std::string, unsigned int>& irreversMap,
-    bool isBiomass // <--- nuovo parametro per la logica speciale
+    bool isBiomass
 )
 {
-    //std::cerr << "\n[DEBUG standardizeReactionName] "
-      //        << "transition='" << transitionName << "', "
-     //         << "reactionBase='" << reactionBase << "', "
-     //         << "isBiomass=" << (isBiomass ? "true" : "false") << "\n";
+    std::cerr << "[DEBUG standardizeReactionName] "
+              << "transition='"   << transitionName   << "', "
+              << "reactionBase='"  << reactionBase     << "', "
+              << "isBiomass="      << (isBiomass ? "true" : "false")
+              << "\n";
 
-    // 1) Se la reazione base è nella mappa irreversibile, usiamola invariata
+    // 1) irreversibile puro
     if (irreversMap.find(reactionBase) != irreversMap.end()) {
-        //std::cerr << "  [DEBUG] '" << reactionBase
-          //        << "' è irreversibile => la teniamo invariata.\n";
+        std::cerr << "  [DEBUG] '" << reactionBase
+                  << "' è irreversibile => restituisco invariato\n";
         return reactionBase;
     }
 
-    // 2) Controlla se esistono forward e/o reverse (splitted)
+    // 2) split disponibili?
     bool splittedF = (forwardMap.find(reactionBase + "_f") != forwardMap.end());
     bool splittedR = (reverseMap.find(reactionBase + "_r") != reverseMap.end());
+    std::cerr << "  [DEBUG] splittedF=" << splittedF
+              << ", splittedR=" << splittedR << "\n";
 
-    // 3) Se non è irreversibile e non è splitted, restituisco invariato
+    // 3) nessun split => invariato
     if (!splittedF && !splittedR) {
-        //std::cerr << "  [WARN] Reaction '" << reactionBase
-         //         << "' non trovata in irreversMap, forwardMap, né reverseMap. La lascio invariata.\n";
+        std::cerr << "  [WARN] '" << reactionBase
+                  << "' non in irreversMap, forwardMap, né reverseMap\n";
         return reactionBase;
     }
 
-    // 4) Gestione speciale Biomass:
+    // 4) logica Biomass
     if (isBiomass) {
-        // Caso 4a: se ha sia input che output => '_f'
+        std::cerr << "  [DEBUG Biomass] inputs=" << inputs.size()
+                  << ", outputs=" << outputs.size() << "\n";
         if (!inputs.empty() && !outputs.empty() && splittedF) {
-           // std::cerr << "  [DEBUG Biomass] '" << reactionBase
-             //         << "' => '_f' (ha sia input che output)\n";
+            std::cerr << "  [DEBUG Biomass] caso 4a → forward ('_f')\n";
             return reactionBase + "_f";
         }
-        // Caso 4b: se ha solo input => '_r' (se splittedR)
         else if (!inputs.empty() && outputs.empty() && splittedR) {
-            //std::cerr << "  [DEBUG Biomass] '" << reactionBase
-            //          << "' => '_r' (ha solo input)\n";
+            std::cerr << "  [DEBUG Biomass] caso 4b → reverse ('_r')\n";
             return reactionBase + "_r";
         }
-        // Altrimenti fallback biomass => invariato (oppure potresti mettere un fallback a _r)
         else {
-           // std::cerr << "  [WARN Biomass] '" << reactionBase
-            //          << "' mismatch => la lascio invariata.\n";
+            std::cerr << "  [WARN Biomass] mismatch, restituisco invariato\n";
             return reactionBase;
         }
     }
 
-    // 5) Non-biomass logic (classica):
-    //    - se ci sono input => '_r'
-    //    - se ci sono output => '_f'
+    // 5) logica “classica” non-biomass
     if (!outputs.empty() && splittedF) {
-        //std::cerr << "  [DEBUG splitted] '" << reactionBase
-        //          << "' => '_r' (ha outputPlaces)\n";
+        std::cerr << "  [DEBUG] non-biomass con outputs → forward ('_f')\n";
         return reactionBase + "_f";
-    } else if (!inputs.empty() && splittedR) {
-        //std::cerr << "  [DEBUG splitted] '" << reactionBase
-        //          << "' => '_r' (ha inputPlaces)\n";
+    }
+    else if (!inputs.empty() && splittedR) {
+        std::cerr << "  [DEBUG] non-biomass con inputs → reverse ('_r')\n";
         return reactionBase + "_r";
     }
 
-    // 6) Fallback
-   // std::cerr << "  [WARN splitted] '" << reactionBase
-      //        << "' mismatch => la lascio invariata.\n";
+    // 6) fallback
+    std::cerr << "  [WARN] fallback finale → restituisco invariato\n";
     return reactionBase;
 }
+
 
     /**
      * Reads and processes the FBA information from a specified file path, initializing data structures necessary for simulation.
@@ -906,70 +984,53 @@ static std::string standardizeReactionName(
             }
         }
 
-        // (2) Per ciascun problemIndex da aggiornare
-        for (auto problemIndex : problemsToUpdate) {
+         for (auto problemIndex : problemsToUpdate)
+						for (const std::string& reaction : reactionsToUpdate)
+						{
+								/* ---- filtri invariati ---- */
+								int colIdx = vec_fluxb[problemIndex].fromNametoid(reaction);
+								if (colIdx == -1)                   continue;
+								if (reaction == "EX_biomass_e_f" ||
+								    reaction == "EX_biomass_e_r")  continue;
+								if (!endsWith(reaction,"_r"))      continue;   // solo uptake
 
-            for (const string& reaction : reactionsToUpdate) {
-                int colIdx = vec_fluxb[problemIndex].fromNametoid(reaction);
-                if (colIdx == -1) {
-                    continue;
-                }
+								/* ---- ①  pool disponibile  ------------------------------- */
+								double conc_mmol_per_mL =
+								    trunc( Value[ NumPlaces.at( FBAplace[reaction] ) ],
+								           decimalTrunc);                      // C_m
 
-                if (reaction == "EX_biomass_e_f" || reaction == "EX_biomass_e_r") {
-                    continue; // do NOT update dynamic bounds for biomass reaction
-                }
-                bool isReverse = false;
-                if (reaction.size() >= 2 && reaction.substr(reaction.size() - 2) == "_r") {
-                    isReverse = true;
-                }
-                if (!isReverse) {
-                    continue;
-                }
+								/* ---- ②  λ (collettivo o singolo) ------------------------ */
+								calculateMultiplicativeConstant(Value, NumPlaces,
+								                                problemIndex, reaction, vec_fluxb);
+								double lambda = multiplicativeConstant;        // mL / (gDW·h)
 
-                double conc = trunc(Value[NumPlaces.at(FBAplace[reaction])], decimalTrunc);
+								/* ---- ③  flusso orario teorico --------------------------- */
+								double vr_max_h = conc_mmol_per_mL * lambda;   // mmol / (gDW·h)
 
-        				 double fluxMaxCandidate = 1e9;
-        				 if (hasBioMASS && hasMultiSpecies) {
-            					calculateMultiplicativeConstant(Value, NumPlaces, problemIndex, reaction);
-            					double lambda = multiplicativeConstant;
+								/* ---- ④  scala al passo d’integrazione ------------------ */
+								double vr_max_dt = vr_max_h * INTEGRATION_STEP_H;   // mmol / (gDW)
 
-            					if (lambda == 0.0 || conc <= 0.0) {
-               				  fluxMaxCandidate = 0; // No flux if lambda or concentration is zero
-            					} else {
-                					fluxMaxCandidate = conc * lambda; // Dynamically scale with concentration and lambda
-            					}
-        					} else {
-            					if (conc > 0.0) {
-                					fluxMaxCandidate = conc; // Scale only with concentration
-            					} else {
-                					fluxMaxCandidate = 0; // No flux if concentration is zero
-            					}
-        					}
+								/* ---- ⑤  protegge dal pool-negativo --------------------- */
+								if (conc_mmol_per_mL <= 0.0 || lambda == 0.0)
+								    vr_max_dt = 0.0;
 
+								/* ---- ⑥  applica il nuovo UB ---------------------------- */
+								vec_fluxb[problemIndex].update_bound(
+								    colIdx,
+								    (vr_max_dt <= 0.0 ? "GLP_FX" : "GLP_DB"),
+								    0.0,
+								    trunc(vr_max_dt, decimalTrunc)
+								);
 
-        					double oldUb = vec_fluxb[problemIndex].getUpBounds(colIdx);
-        					if (conc > 0.0) {
-           				 if (oldUb == 0) {
-               				 oldUb = fluxMaxCandidate;
-            					} else {
-               				 oldUb = std::max(oldUb, fluxMaxCandidate);
-           				  }
-        					} else {
-           				 oldUb = 0;
-       					}
+								std::cout << "[UB-upd] " << reaction
+								          << "  LP="   << vec_fluxb[problemIndex].getFilename()
+								          << "  C_m="  << conc_mmol_per_mL
+								          << "  λ="    << lambda
+								          << "  UB(h)="<< vr_max_h
+								          << "  UB(dt)="<< vr_max_dt << '\n';
+						}
+				}
 
-
-        					double newUb = fluxMaxCandidate;
-
-        					double Lb = 0.0;
-        					if (newUb <= Lb) {
-            					vec_fluxb[problemIndex].update_bound(colIdx, "GLP_FX", Lb, Lb);
-        					} else {
-            					vec_fluxb[problemIndex].update_bound(colIdx, "GLP_DB", Lb, newUb);
-        					}
-            }
-        }
-    }
 
 
     /**
@@ -1063,59 +1124,72 @@ static std::string standardizeReactionName(
     }
 
 
-    /**
-     * Computes the metabolic rate for a given transition based on its position and the current metabolic state.
-     * The rate is calculated from the solution to the FBA LP problem associated with the transition.
-     * The rate is then adjusted based on whether the transition is an input or an output.
-     * 
-     * @param vec_fluxb A vector containing all the FBA problems.
-     * @param NumPlaces A map linking metabolite names to their indices in the solution vector.
-     * @param NameTrans A vector containing the names of all transitions.
-     * @param Value The current state values of metabolites.
-     * @param T The index of the transition for which the rate is being computed.
-     * @param decimalTrunc The precision to which values are truncated.
-     * @param time The current simulation time.
-     * @return double The computed and adjusted metabolic rate for the transition.
-     */
-    double computeRate(vector<class FBGLPK::LPprob>& vec_fluxb, map<string, int>& NumPlaces, const vector<string>& NameTrans, const double* Value, const int T, const double decimalTrunc, const double& time) {
-        string transitionName = NameTrans[T];
+			/***************************************************************************
+			 *  Compute reaction-rate (INTENSITY) for an ESPN transition                *
+			 *  - segue le definizioni:                                                *
+			 *      - Eq.(\ref{eq:zeta_biomass})  →  ζ_B = MW_B · x_B  (MW_B = 1)      *
+			 *      - Eq.(\ref{eq:zeta_non_biomass}) → ζ(m) = x_N · x_B · 10⁻¹²        *
+			 *  - v★  è l’output FBA (mmol / gDW / h)                                   *
+			 *  - rate restituito:                                                     *
+			 *      - biomassa  →  pgDW / cell / h  (può essere usato per Δx_B)        *
+			 *      - altri metaboliti → mmol / h                                       *
+			 ***************************************************************************/
+			double computeRate(std::vector<FBGLPK::LPprob>&  vec_fluxb,
+						             std::map<std::string,int>&    NumPlaces,
+						             const std::vector<std::string>& NameTrans,
+						             const double*                 Value,
+						             int                           T,
+						             double                        decimalTrunc,
+						             const double&                 time)
+			{
+					const std::string& transitionName = NameTrans[T];
+					const size_t       problemIndex   = FBAproblems[transitionName];
 
-        int problemIndex = FBAproblems[transitionName];
+					/*―― 1. ricavo il flusso specifico ottimo v★ [mmol/gDW/h] ――*/
+					int varIndex   = vec_fluxb[problemIndex].fromNametoid( FBAreact[transitionName] );
+					double vStar   = Vars[problemIndex][varIndex];               // mmol / gDW / h
+					double mult    = ReactionMultiplicity[transitionName];       // fattore d’unità (ad es. mM→mmol)
 
-        int varIndex = vec_fluxb[problemIndex].fromNametoid(FBAreact[transitionName]);
-       // int tmpProva = vec_fluxb[problemIndex].fromNametoid("biomass525");
-        //double rateTmp = Vars[problemIndex][tmpProva];
-        //std::cout << "[tmpProva] biomass525 rate : " << rateTmp <<  std::endl;
+					/*―― 2. stato attuale sistema ――*/
+					double xB = 1.0;   // pgDW / cell
+					if (hasBioMASS)
+						  xB = Value[ NumPlaces.at( problemBiomassPlace.at(problemIndex) ) ];   // x_B
 
-        double rate = Vars[problemIndex][varIndex];
+					long   xN = 1;     // numero di cellule
+					if (hasMultiSpecies)
+						  xN = std::lround( std::floor( Value[ NumPlaces.at( problemBacteriaPlace.at(problemIndex) ) ] ) );
 
-        double constant = 1.0;
-        double currentBiomass = 1.0;
+					const bool isBiomass = (biomassTransitions.find(transitionName) != biomassTransitions.end());
 
-        double scalingMeasure = ReactionMultiplicity[transitionName];
-        //cout << " [Debug Transition Rate]: " << transitionName << "Scaling Factor for measure unit: " <<  scalingMeasure << endl;
+					/*―― 3. calcolo ζ(m) secondo il tipo di transizione ――*/
+					double zeta = 1.0;
+					if (isBiomass) {
+						  /*  ζ_B  =  MW_B · x_B   (MW_B = 1 gDW/mmol)                       */
+						  zeta = xB;                                    // pgDW / cell
+					} else {
+						  /*  ζ(m) = x_N · x_B · 10⁻¹²  [Eq.(37)]                            */
+						  zeta = static_cast<double>(xN) * xB * 1e-12;  // gDW (⇒ v★·ζ → mmol/h)
+					}
 
-        if(hasBioMASS){
-            currentBiomass = Value[NumPlaces.at(problemBiomassPlace.at(problemIndex))];
-        }
+					/*―― 4. rate finale ――*/
+					double rate = vStar * zeta * mult;
 
-        if (hasBioMASS && biomassTransitions.find(transitionName) != biomassTransitions.end()) {
-           // std::cout << "[computeRate] Biomass Transition Detected for Transition : " << transitionName << " rateo: " << rate << std::endl;
-            constant = floor(Value[NumPlaces.at(problemBacteriaPlace.at(problemIndex))]);
-            return rate * scalingMeasure;
-        } else if (hasMultiSpecies && hasBioMASS) {
-            constant = floor(Value[NumPlaces.at(problemBacteriaPlace.at(problemIndex))]);
-        }
+					/*―― 5. DEBUG VERBOSO ――*/
+					std::cout << "\n[computeRate] transition=" << transitionName
+						        << (isBiomass ? "  (biomass)" : "  (boundary)")
+						        << "\n   v*                = " << vStar               << "  [mmol/gDW/h]"
+						        << "\n   x_B               = " << xB                  << "  [pgDW/cell]"
+						        << "\n   x_N               = " << xN                  << "  [cell]"
+						        << "\n   ζ                 = " << zeta
+						        << (isBiomass ? "  [pgDW/cell]" : "  [gDW]")
+						        << "\n   multiplicity (μ)  = " << mult
+						        << "\n   → rate            = " << rate
+						        << (isBiomass ? "  [pgDW/cell/h]" : "  [mmol/h]")
+						        << std::endl;
 
+					return rate;
+			}
 
-        if(hasBioMASS) {
-           // std::cout << "[computeRate] Other rate Transition Detected for Transition : " << transitionName << " rateo: " << rate << std::endl;
-            rate = rate * (constant * currentBiomass * scalingFactor) * scalingMeasure;
-        }
-
-        //cout << "Ritorno rateo: " << rate << endl;
-        return rate;
-    }
 
 
     /**
@@ -1194,248 +1268,480 @@ static std::string standardizeReactionName(
     		}
 		}
 
+		// -------------------------------------------------------------------------
+		// Utility: choose first existing filename from a list                   
+		// -------------------------------------------------------------------------
+		static std::string firstExisting(const std::vector<std::string>& paths)
+		{
+				for (const auto& p : paths) {
+				    std::ifstream test(p.c_str());
+				    if (test.good()) return p;
+				}
+				return "";            // none found
+		}
+
+		/*─────────────────────────────────────────────────────────────────────────────
+		 *  Lettura CSV upper-bounds NON-projected
+		 *  – memorizza UB di base  (NonFBAReactionBaseUB)
+		 *  – salva subtype         (ReactionSubtype)   ←  "exchange" | "internal"
+		 *────────────────────────────────────────────────────────────────────────────*/
+		void updateNonFBAReactionUpperBoundsFromFile(
+				    std::vector<FBGLPK::LPprob>& vec_fluxb,
+				    const std::string& /*unused*/)
+		{
+				/*─────────────── percorsi prioritari ───────────────────────────*/
+				const std::string pathFwd = firstExisting({
+				    "non_projected_forward_bounds_gui.csv",
+				    "non_projected_forward_bounds.csv",
+				    "ub_bounds_not_projected_gui.csv",      // legacy fallback
+				    "ub_bounds_not_projected.csv",
+				    "EX_upper_bounds_nonFBA.csv"            // last‑chance fallback
+				});
+				const std::string pathRev = firstExisting({
+				    "non_projected_reverse_background_met_gui.csv",
+				    "non_projected_reverse_background_met.csv"
+				});
+
+				if (pathFwd.empty() && pathRev.empty()) {
+				    std::cerr << "Warning: non‑FBA bounds CSVs not found – UBs unchanged." << std::endl;
+				    return;                                      // niente da fare
+				}
+
+				using Key  = std::pair<std::string,std::size_t>;         // (reaction,LPidx)
+				using RowF = std::tuple<std::string,std::string,double>; // debug riga forward
+				using RowR = std::tuple<std::string,std::string,double,double,double>; // reverse
+
+				std::unordered_set<Key,RxnLPHash> done;                  // evita duplicati
+				std::vector<RowF> debugFwd;
+				std::vector<RowR> debugRev;
+
+				auto parseLpList = [&](const std::string& rxn,
+				                       const std::string& model)->std::vector<std::size_t>
+				{
+				    std::vector<std::size_t> lpList;
+				    /* 1) match esplicito */
+				    if (!model.empty()) {
+				        size_t idx = findLPIndex(vec_fluxb, model);
+				        if (idx != std::numeric_limits<size_t>::max()) lpList.push_back(idx);
+				    }
+				    /* 2) fallback reaction→LP map */
+				    if (lpList.empty()) {
+				        auto it = reactionToFileMap.find(rxn);
+				        if (it != reactionToFileMap.end())
+				            lpList.insert(lpList.end(), it->second.begin(), it->second.end());
+				    }
+				    return lpList;
+				};
+
+				/*──────────────────────── 1) CSV FORWARD (_f) ───────────────────────*/
+				if (!pathFwd.empty()) {
+				    std::ifstream file(pathFwd.c_str());
+				    if (!file.good()) {
+				        std::cerr << "[NonFBA‑FWD] Impossibile aprire '"<<pathFwd<<"' – skip"<<std::endl;
+				    } else {
+				        std::string header;  std::getline(file, header);   // header ignorato
+				        std::string line;
+				        while (std::getline(file,line)) {
+				            if (line.empty()) continue;
+				            std::istringstream ss(line);
+				            std::string reaction, model, ubStr;
+				            std::getline(ss,reaction,',');
+				            std::getline(ss,model,',');
+				            std::getline(ss,ubStr,',');
+				            if (reaction.empty() || ubStr.empty()) continue;
+
+				            double baseUb = 0.0;
+				            try { baseUb = std::stod(ubStr); }
+				            catch (...) { std::cerr << "[NonFBA‑FWD] UB non numerico per "<<reaction<<"\n"; continue; }
+
+				            const auto lpList = parseLpList(reaction,model);
+				            if (lpList.empty()) {
+				                std::cerr << "[NonFBA‑FWD] nessun LP trovato per '"<<reaction<<"'\n";
+				                continue;
+				            }
+
+				            const std::string subtype = (reaction.rfind("EX_",0)==0) ? "exchange" : "internal";
+				            for (size_t idx: lpList) {
+				                Key key{reaction,idx};
+				                if (done.count(key)) continue;
+				                done.insert(key);
+
+				                NonFBAReactionBaseUB[key] = baseUb;
+				                ReactionSubtype[key]      = subtype;
+				                debugFwd.emplace_back(reaction, vec_fluxb[idx].getFilename(), baseUb);
+				            }
+				        }
+				        file.close();
+				    }
+				}
+
+				/*──────────────────────── 2) CSV REVERSE (_r) ───────────────────────*/
+				if (!pathRev.empty()) {
+				    std::ifstream file(pathRev.c_str());
+				    if (!file.good()) {
+				        std::cerr << "[NonFBA‑REV] Impossibile aprire '"<<pathRev<<"' – skip"<<std::endl;
+				    } else {
+				        std::string header;  std::getline(file, header);
+				        std::string line;
+				        while (std::getline(file,line)) {
+				            if (line.empty()) continue;
+				            std::istringstream ss(line);
+				            std::string reaction, model, bgStr, volStr;
+				            std::getline(ss,reaction,',');
+				            std::getline(ss,model,',');
+				            std::getline(ss,bgStr,',');
+				            std::getline(ss,volStr,',');
+				            if (reaction.empty() || bgStr.empty() || volStr.empty()) continue;
+
+				            double background=0.0, volume=0.0;
+				            try {
+				                background = std::stod(bgStr);
+				                volume     = std::stod(volStr);
+				            } catch(...) {
+				                std::cerr << "[NonFBA‑REV] valori non numerici per "<<reaction<<"\n";
+				                continue;
+				            }
+				            double baseUb = background * volume;          // mmol
+
+				            const auto lpList = parseLpList(reaction,model);
+				            if (lpList.empty()) {
+				                std::cerr << "[NonFBA‑REV] nessun LP trovato per '"<<reaction<<"'\n";
+				                continue;
+				            }
+				            const std::string subtype = (reaction.rfind("EX_",0)==0) ? "exchange" : "internal";
+				            for (size_t idx: lpList) {
+				                Key key{reaction,idx};
+				                if (done.count(key)) continue;
+				                done.insert(key);
+
+				                NonFBAReactionBaseUB[key] = baseUb;
+				                ReactionSubtype[key]      = subtype;
+				                debugRev.emplace_back(reaction, vec_fluxb[idx].getFilename(), background, volume, baseUb);
+				            }
+				        }
+				        file.close();
+				    }
+				}
+
+				/*──────────────────── nessuna riga valida? → early exit ─────────────*/
+				if (debugFwd.empty() && debugRev.empty()) {
+				    std::cerr << "[NonFBA] CSV presenti ma nessuna riga valida – UBs inalterati." << std::endl;
+				    return;
+				}
+
+				/*──────────────────────── dump debug CSV ─────────────────────────────*/
+				if (!debugFwd.empty()) {
+				    std::ofstream dbg("debug_nonFBA_forward_bounds.csv");
+				    dbg << "reaction,LPfile,baseUB\n";
+				    for (auto& r: debugFwd)
+				        dbg << std::get<0>(r) << ',' << std::get<1>(r) << ',' << std::get<2>(r) << '\n';
+				    dbg.close();
+				}
+				if (!debugRev.empty()) {
+				    std::ofstream dbg("debug_nonFBA_reverse_bounds.csv");
+				    dbg << "reaction,LPfile,background_met,volume,baseUB\n";
+				    for (auto& r: debugRev)
+				        dbg << std::get<0>(r) << ',' << std::get<1>(r) << ',' << std::get<2>(r) << ','
+				            << std::get<3>(r) << ',' << std::get<4>(r) << '\n';
+				    dbg.close();
+				}
+		}
+
+		// ──────────────────────────────────────────────────────────────
+		// 2) loadAndApplyFBAReactionUpperBounds  (con warning & safe exit su file vuoto)
+		// ──────────────────────────────────────────────────────────────
+		void loadAndApplyFBAReactionUpperBounds(
+				std::vector<FBGLPK::LPprob>& vec_fluxb,
+				const std::string& /*unused*/)
+		{
+				// Trova il primo file esistente nella lista
+				const std::string path = firstExisting({
+				    "ub_bounds_projected_gui.csv",
+				    "ub_bounds_projected.csv",
+				    "EX_upper_bounds_FBA.csv"
+				});
+				if (path.empty()) {
+				    std::cerr << "[Warning] FBA bounds CSV not found – UBs unchanged.\n";
+				    return;
+				}
+
+				// Prova ad aprire il file, esci se non valido
+				std::ifstream file(path.c_str());
+				if (!file.good()) {
+				    std::cerr << "[Warning] Cannot open FBA bounds file '" << path
+				              << "' – UBs unchanged.\n";
+				    return;
+				}
+
+				// Contenitori temporanei
+				std::unordered_set<std::pair<std::string,std::size_t>, RxnLPHash> done;
+				std::vector<std::tuple<std::string,std::string,double>> debugRows;
+
+				// Salta l'intestazione
+				std::string header;
+				std::getline(file, header);
+
+				// Leggi e processa ogni riga
+				std::string line;
+				while (std::getline(file, line)) {
+				    if (line.empty()) continue;
+
+				    std::istringstream ss(line);
+				    std::string reaction, model, ubStr;
+				    std::getline(ss, reaction, ',');
+				    std::getline(ss, model,    ',');
+				    std::getline(ss, ubStr,     ',');
+				    if (reaction.empty() || ubStr.empty()) continue;
+
+				    // Converte upper_bound
+				    double newUb;
+				    try {
+				        newUb = std::stod(ubStr);
+				    } catch (...) {
+				        std::cerr << "[FBA] Warning: UB non numerico per " << reaction << "\n";
+				        continue;
+				    }
+
+				    // Trova l'indice LP corrispondente
+				    std::size_t lpIdx = findLPIndex(vec_fluxb, model);
+				    if (lpIdx == std::numeric_limits<std::size_t>::max()) {
+				        std::cerr << "[FBA] Warning: modello '" << model
+				                  << "' non trovato per la reazione '" << reaction << "'\n";
+				        continue;
+				    }
+
+				    auto key = std::make_pair(reaction, lpIdx);
+				    if (done.count(key)) continue;
+				    done.insert(key);
+
+				    // Recupera la colonna nel problema LP
+				    int col = vec_fluxb[lpIdx].fromNametoid(reaction);
+				    if (col == -1) {
+				        std::cerr << "[FBA] Warning: reazione '" << reaction
+				                  << "' non presente in LP '" << vec_fluxb[lpIdx].getFilename()
+				                  << "' – skip\n";
+				        continue;
+				    }
+
+				    // Applica il nuovo upper bound
+				    double lb = vec_fluxb[lpIdx].getLwBounds(col);
+				    vec_fluxb[lpIdx].update_bound(
+				        col,
+				        "GLP_DB",
+				        trunc(lb, decimalTrunc),
+				        trunc(newUb, decimalTrunc)
+				    );
+
+				    // Registra per il debug
+				    debugRows.emplace_back(reaction, vec_fluxb[lpIdx].getFilename(), newUb);
+				}
+				file.close();
+
+				// Se nessuna riga valida, esci senza modifiche
+				if (debugRows.empty()) {
+				    std::cerr << "[Warning] FBA bounds file '" << path
+				              << "' is empty or contains no valid entries – UBs unchanged.\n";
+				    return;
+				}
+
+				// Scrivi il file di debug
+				std::ofstream dbg("debug_FBA_updated_bounds.csv");
+				dbg << "reaction,LPfile,new_upper_bound\n";
+				for (auto& r : debugRows) {
+				    dbg << std::get<0>(r) << ','
+				        << std::get<1>(r) << ','
+				        << std::get<2>(r) << '\n';
+				}
+				dbg.close();
+		}
 
 
-    void updateNonFBAReactionUpperBoundsFromFile(
-        vector<FBGLPK::LPprob>& vec_fluxb,
-        const string& filename = "EX_upper_bounds_nonFBA.csv"
-    ) {
-        ifstream file(filename);
-        if (!file.is_open()) {
-            cerr << "Warning: " << filename << " not found. "
-                 << "Using original model's bounds as default base UB." << endl;
+		/*─────────────────────────────────────────────────────────────────────────────
+		 *  updateNonFBAReactionsUB
+		 *
+		 *  - gestisce **solo** le reazioni NON-projected (_r e _f)
+		 *  - per le _f mantiene l’UB fisso letto dal CSV
+		 *  - per le _r calcola l’UB dinamico:
+		 *
+		 *         newUB = |Cₘ| · λ
+		 *
+		 *         λ =  1 / Σ_k (xN_k · xB_k · 10⁻¹²)      se subtype == "exchange"
+		 *             1 /   (xN_s · xB_s · 10⁻¹²)         altrimenti (demand/sink int.)
+		 *
+		 *  dove Cₘ è il valore (concentrazione) salvato in NonFBAReactionBaseUB.
+		 *  MW_B = 1 quindi il fattore 10⁻¹² converte pgDW → gDW.
+		 *────────────────────────────────────────────────────────────────────────────*/
+		void updateNonFBAReactionsUB(std::vector<FBGLPK::LPprob>& vec_fluxb,
+				                         std::map<std::string,int>&    NumPlaces,
+				                         double*                       Value)
+		{
+				using Row = std::tuple<std::string,std::string,double,double,double,double,double>;
+				std::vector<Row> dbg;                                  
 
-            // Se il file non viene trovato, popola NonFBAReactionBaseUB con i bound attuali del modello per le reazioni non-FBA.
-            for (const auto& rxnEntry : reactionToFileMap) {
-                const string& rxn = rxnEntry.first;
-                if (FBAreactions.find(rxn) != FBAreactions.end()) {
-                    continue;
-                }
-                const auto& problemIndices = rxnEntry.second;
-                for (size_t idx : problemIndices) {
-                    int reactionId = vec_fluxb[idx].fromNametoid(rxn);
-                    if (reactionId == -1) {
-                        continue; // Reaction not found in this LP
-                    }
-                    double originalUb = vec_fluxb[idx].getUpBounds(reactionId);
-                    cout << "reaction: " << rxn << " original bound: " << originalUb << endl;
-                    NonFBAReactionBaseUB[std::make_pair(rxn, idx)] = originalUb;
-                }
-            }
-            return;
-        }
+				/*──────────────── helper: lista LP contenenti la reazione ───────────────*/
+				auto lpListFor = [&](const std::string& rxn)->std::vector<std::size_t>
+				{
+				    std::vector<std::size_t> v;
+				    for (auto& kv : NonFBAReactionBaseUB)
+				        if (kv.first.first == rxn) v.push_back(kv.first.second);
+				    if (!v.empty()) return v;
 
-        vector<string> lines;
-        {
-            string line;
-            while (getline(file, line)) {
-                lines.push_back(line);
-            }
-        }
-        file.close();
+				    auto it = reactionToFileMap.find(rxn);
+				    if (it != reactionToFileMap.end())
+				        v.insert(v.end(), it->second.begin(), it->second.end());
+				    return v;
+				};
 
-        if (lines.empty()) {
-            return;
-        }
+				/*────────── unione delle chiavi di entrambe le mappe (csv + fallback) ───*/
+				std::unordered_set<std::string> allRxn;
+				for (auto& kv : reactionToFileMap)    allRxn.insert(kv.first);
+				for (auto& kv : NonFBAReactionBaseUB) allRxn.insert(kv.first.first);
 
-        double baseUB = 0.0;
-        {
-            istringstream ss(lines[0]);
-            string header;
-            getline(ss, header, ','); // legge "base_upper_bounds"
-            string valueStr;
-            getline(ss, valueStr, ',');
-            baseUB = stod(valueStr);
-        }
+				/*────────────────────────── loop principale ─────────────────────────────*/
+				for (const std::string& rxn : allRxn)
+				{
+				    /* skip se è una reazione pure-FBA oppure una _f (fissa) */
+				    if (FBAreactions.count(rxn) || !endsWith(rxn,"_r"))
+				        continue;
 
-        for (size_t lineIdx = 1; lineIdx < lines.size(); ++lineIdx) {
-            istringstream ss(lines[lineIdx]);
-            string reactionName;
-            getline(ss, reactionName, ',');
+				    /* LP che contengono questa reazione */
+				    const auto lpIdxList = lpListFor(rxn);
+				    if (lpIdxList.empty()) continue;
 
-            if (FBAreactions.find(reactionName) != FBAreactions.end()) {
-                continue;
-            }
+				    for (std::size_t idx : lpIdxList)
+				    {
+				        int col = vec_fluxb[idx].fromNametoid(rxn);
+				        if (col == -1) continue;
 
-            string newUbStr;
-            getline(ss, newUbStr, ',');
-            double newUb = stod(newUbStr);
+				        /* pop & biomass correnti della specie del LP -------------------*/
+				        double pop = 1.0, biomass = 1.0;
+				        if (problemBacteriaPlace.count(idx))
+				            pop = std::floor(Value[ NumPlaces.at(problemBacteriaPlace[idx]) ]);
+				        if (problemBiomassPlace.count(idx))
+				            biomass = trunc(Value[ NumPlaces.at(problemBiomassPlace[idx]) ],
+				                            decimalTrunc);
 
-            auto it = reactionToFileMap.find(reactionName);
-            if (it != reactionToFileMap.end()) {
-                const auto& problemIndices = it->second;
-                for (size_t idx : problemIndices) {
-                    int reactionId = vec_fluxb[idx].fromNametoid(reactionName);
-                    if (reactionId == -1) {
-                        continue;                    }
+				        if (pop <= 0.0) {                              // specie estinta
+				            vec_fluxb[idx].update_bound(col,"GLP_FX",0.0,0.0);
+				            dbg.emplace_back(rxn,vec_fluxb[idx].getFilename(),
+				                             pop,biomass,0.0,
+				                             vec_fluxb[idx].getUpBounds(col),0.0);
+				            continue;
+				        }
 
-                    NonFBAReactionBaseUB[std::make_pair(reactionName, idx)] = baseUB;
+				        /* Cₘ (baseUB) ---------------------------------------------------*/
+				        auto key = std::make_pair(rxn, idx);
+				        auto itB = NonFBAReactionBaseUB.find(key);
+				        if (itB == NonFBAReactionBaseUB.end()) continue;
+				        const double C_m = fabs(itB->second);          // mmol/L  (o mmol)
 
-                    double currentLb = vec_fluxb[idx].getLwBounds(reactionId);
-                    vec_fluxb[idx].update_bound(
-                        reactionId,
-                        "GLP_DB",
-                        trunc(currentLb, decimalTrunc),
-                        trunc(newUb, decimalTrunc)
-                    );
+				        /* recupero subtype ("exchange" oppure interno) -----------------*/
+				        std::string subtype = "exchange";              // fallback
+				        auto itSub = ReactionSubtype.find(key);
+				        if (itSub != ReactionSubtype.end()) subtype = itSub->second;
 
-                   // debug cout << "Updating reaction: " << reactionName << " with new bound: " << newUb << endl;
-                }
-            }
-        }
-    }
+				        /* λ -------------------------------------------------------------*/
+				        double lambda = 0.0;
+				        if (subtype == "exchange") {
+				            double denom = 0.0;
+				            for (auto k : lpIdxList) {
+				                double Nk = std::floor(Value[ NumPlaces.at(problemBacteriaPlace[k]) ]);
+				                double Bk = trunc(Value[ NumPlaces.at(problemBiomassPlace[k]) ],
+				                                  decimalTrunc);
+				                denom += Nk * Bk * 1e-12;              // gDW
+				            }
+				            lambda = (denom > 0.0) ? 1.0 / denom : 0.0;
+				        } else {                                      // internal
+				            double denom = pop * biomass * 1e-12;
+				            lambda = (denom > 0.0) ? 1.0 / denom : 0.0;
+				        }
 
+				        /* nuovo upper-bound --------------------------------------------*/
+				        const double newUb = C_m * lambda;            // mmol/gDW/h
+				        const double oldUb = vec_fluxb[idx].getUpBounds(col);
 
-    void loadAndApplyFBAReactionUpperBounds(
-        vector<FBGLPK::LPprob>& vec_fluxb,
-        const string& filename = "EX_upper_bounds_FBA.csv"
-    ) {
-        ifstream file(filename);
-        if (!file.is_open()) {
-            cerr << "[Warning] : " << filename << " not found. Skipping updating FBA reaction upper bounds." << endl;
-            return;
-        }
+				        if (newUb <= 0.0) {
+				            vec_fluxb[idx].update_bound(col,"GLP_FX",0.0,0.0);
+				        } else {
+				            vec_fluxb[idx].update_bound(col,"GLP_DB",0.0,newUb);
+				        }
 
-        string line;
-        while (getline(file, line)) {
-            istringstream ss(line);
-            string reaction;
-            vector<double> bounds;
-            string boundStr;
+				        dbg.emplace_back(rxn, vec_fluxb[idx].getFilename(),
+				                         pop, biomass, C_m, oldUb, newUb);
+				    }
+				}
 
-            // 1) Extract the reaction name
-            getline(ss, reaction, ',');
-
-            // 2) Extract the numeric fields
-            while (getline(ss, boundStr, ',')) {
-                bounds.push_back(stod(boundStr));
-            }
-
-            // 3) Check if the reaction exists in reactionToFileMap
-            auto it = reactionToFileMap.find(reaction);
-            if (it != reactionToFileMap.end()) {
-                const auto& problemIndices = it->second;
-
-                // 4) Update the bounds
-                size_t i = 0;
-                for (auto idxIter = problemIndices.begin(); idxIter != problemIndices.end(); ++idxIter, ++i) {
-                    size_t problemIndex = *idxIter;
-                    int reactionId = vec_fluxb[problemIndex].fromNametoid(reaction);
-                    if (reactionId == -1) {
-                        continue;
-                    }
-
-                    if (problemIndex >= bounds.size()) {
-                        continue;
-                    }
-
-                    // Use the correct value from bounds
-                    double newUb = bounds[problemIndex];
-
-                    // Retrieve the current lower bound
-                    double currentLb = vec_fluxb[problemIndex].getLwBounds(reactionId);
-
-                    // Update bounds
-                    vec_fluxb[problemIndex].update_bound(
-                        reactionId,
-                        "GLP_DB",
-                        trunc(currentLb, decimalTrunc),
-                        trunc(newUb, decimalTrunc)
-                    );
-                }
-            }
-        }
-
-        file.close();
-    }
+				/* dump debug -----------------------------------------------------------*/
+				std::ofstream out("debug_nonFBA_runtime_bounds.csv");
+				out << "reaction,LPfile,pop,biomass,Cm(oldBase),oldUB,newUB\n";
+				for (auto& r : dbg)
+				    out << std::get<0>(r) << ','
+				        << std::get<1>(r) << ','
+				        << std::get<2>(r) << ','
+				        << std::get<3>(r) << ','
+				        << std::get<4>(r) << ','
+				        << std::get<5>(r) << ','
+				        << std::get<6>(r) << '\n';
+				out.close();
+		}
 
 
-    void updateNonFBAReactionsUB(
-        vector<FBGLPK::LPprob>& vec_fluxb,
-        map<string, int>& NumPlaces,
-        double* Value
-    ) {
-        for (const auto& reactionEntry : reactionToFileMap) {
-            const string& reaction = reactionEntry.first;
+		void updateAllBiomassReactionsUpperBounds(
+				    double*                        Value,
+				    const map<string,int>&         NumPlaces,
+				    vector<FBGLPK::LPprob>&        vec_fluxb)
+		{
+				problemsWithLowBiomass.clear();
 
-            // Skip if it's an FBA reaction
-            if (FBAreactions.find(reaction) != FBAreactions.end()) {
-                continue;
-            }
+				for (const auto& transition : biomassTransitions) {
 
-            // All non-FBA reactions
-            const auto& problemIndices = reactionEntry.second;
-            for (size_t index : problemIndices) {
-                int reactionId = vec_fluxb[index].fromNametoid(reaction);
-                if (reactionId == -1) {
-                    continue; // reaction not found in this LP
-                }
+				    const size_t problemIndex = FBAproblems[transition];
+				    const double BioMax       = vec_fluxb[problemIndex].getBioMax();   // x_B,max [pgDW/cell]
+				    const double BioMin       = vec_fluxb[problemIndex].getBioMin();   // x_B,min [pgDW/cell]
+				    const double xB           = trunc(Value[ NumPlaces.at( problemBiomassPlace.at(problemIndex) ) ],
+				                                      decimalTrunc);                   // x_B    [pgDW/cell]
 
-                // Population, biomass, etc.
-                string placeName = problemBacteriaPlace[index];
-                double population = floor(Value[NumPlaces.at(placeName)]);
-                double biomass    = trunc(Value[NumPlaces.at(problemBiomassPlace.at(index))], decimalTrunc);
+				    const double Gamma        = BioMax - xB;                           // Γ      [pgDW/cell]
 
-                // If no population => set reaction to 0.
-                if (population <= 0.0) {
-                    vec_fluxb[index].update_bound(
-                        reactionId, "GLP_FX", 0.0, 0.0
-                    );
-                    continue;
-                }
+				    /* ---------- calcolo nuovo UB secondo Eq.(5.16) ---------- */
+					/* ---------- calcolo nuovo UB secondo Eq.(5.16) ---------- */
+					double newUB = 0.0;
+					double mu = muMaxMap.count(problemIndex) ? muMaxMap[problemIndex] : 1.0;
 
-                // Attempt to find a baseUb in NonFBAReactionBaseUB.
-                auto mapKey = std::make_pair(reaction, index);
-                auto it = NonFBAReactionBaseUB.find(mapKey);
-                if (it == NonFBAReactionBaseUB.end()) {
-                    // Key not in map => do NOT update bounds, keep the model's original.
-                    continue;
-                }
+					if (xB < BioMin) {
+							newUB = 0.0;                                  // metabolic distress
+							problemsWithLowBiomass[problemIndex] = true;
+					}
+					else if (Gamma > 0.0) {
+							newUB = Gamma / BioMax * mu;                  // mmol / gDW / h
+					}
+					else {                                            // Γ ≤ 0
+							newUB = Lcutoff;                              // growth-limitation cut-off
+					}
 
-                // Otherwise, we have a baseUb from the map.
-                double baseUb = it->second;
-                double newUb  = baseUb / ((population * biomass) / Mw);
+				    /* ---------- applicazione bound ---------- */
+				    const int rxnIdx   = vec_fluxb[problemIndex].getPFBA_index();  // indice reazione biomassa
+				    const double LBold = vec_fluxb[problemIndex].getLwBounds(rxnIdx);
 
+				    if (newUB <= LBold + 1e-15) {                  // ≈ stesso valore → fixa a 0
+				        vec_fluxb[problemIndex].update_bound(rxnIdx, "GLP_FX", 0.0, 0.0);
+				    } else {
+				        vec_fluxb[problemIndex].update_bound(rxnIdx, "GLP_DB",
+				                                             LBold,
+				                                             trunc(newUB, decimalTrunc));
+				    }
 
-                // Update the GLPK problem with newUb
-                vec_fluxb[index].update_bound(
-                    reactionId, "GLP_DB", 0.0, newUb
-                );
-            }
-        }
-    }
+				    /* ---------- DEBUG verbose ---------- */
+						std::cout << "[Biomass UB] LP="  << vec_fluxb[problemIndex].getFilename()
+											<< "  xB="             << xB
+											<< "  BioMin="         << BioMin
+											<< "  BioMax="         << BioMax
+											<< "  Γ="              << Gamma
+											<< "  μ_max="          << mu
+											<< "  → newUB="        << newUB << " mmol/gDW/h\n";
 
-
-    void updateAllBiomassReactionsUpperBounds(double* Value, const map<string, int>& NumPlaces, vector<class FBGLPK::LPprob>& vec_fluxb) {
-        problemsWithLowBiomass.clear(); // Clear the low biomass problems map at the start of each update cycle
-        for (const auto& transition : biomassTransitions) {
-            size_t problemIndex = FBAproblems[transition];  // Get the problem index associated with the transition
-
-            string reaction = FBAreact[transition];
-
-            double BioMax = vec_fluxb[problemIndex].getBioMax();
-            double CurrentBiomass = trunc(Value[NumPlaces.at(problemBiomassPlace.at(problemIndex))], decimalTrunc);
-            double BioMin = vec_fluxb[problemIndex].getBioMin();
-
-            double Gamma = BioMax - CurrentBiomass;
-            //cout << "Valore Gamma " << Gamma << " per il problema " << problemIndex << endl;
-
-            double newUpperBound;
-            if (CurrentBiomass < BioMin) {
-                newUpperBound = Gamma; // Positive Gamma, set upper bound to Gamma
-                problemsWithLowBiomass[problemIndex] = true; // Mark this problem as having low biomass
-            } else if (Gamma > 0) {
-                newUpperBound = Gamma; // Positive Gamma, set upper bound to Gamma
-            } else {
-                newUpperBound = 1e-6; // Gamma not positive, set upper bound to small cutoff
-            }
-
-        			int index = vec_fluxb[problemIndex].getPFBA_index();
-            double currentLowerBound = vec_fluxb[problemIndex].getLwBounds(index);
-
-            vec_fluxb[problemIndex].update_bound(index, "GLP_DB", currentLowerBound, trunc(newUpperBound, decimalTrunc));
-        }
-    }
+				}
+		}
 
 
     void performPFBA(vector<class FBGLPK::LPprob>& vec_fluxb, int problemIndex) {
@@ -1468,4 +1774,78 @@ static std::string standardizeReactionName(
         // Step 3.1: Torno a massimizzare la biomassa
         vec_fluxb[problemIndex].resetMaximizationObjectiveForBiomass(biomassIndex);
     }
+
+		/*───────────────────────────────────────────────────────────────
+		 *  loadMuMaxValues
+		 *  - CSV con header:  Model,mu_max
+		 *  - se non esiste o vuoto → μmax = 1 per tutti i modelli
+		 *───────────────────────────────────────────────────────────────*/
+		void loadMuMaxValues(const std::vector<FBGLPK::LPprob>& vec_fluxb)
+		{
+				const std::string path = firstExisting({
+				    "mu_max_values_gui.csv",
+				    "mu_max_values.csv"
+				});
+
+				/* default: 1 per tutti i modelli */
+				muMaxMap.clear();
+				for (std::size_t i = 0; i < vec_fluxb.size(); ++i)
+				    muMaxMap[i] = 1.0;
+
+				if (path.empty()) {
+				    std::cerr << "[μmax] CSV not found – using μmax = 1 for every model.\n";
+				    return;
+				}
+
+				std::ifstream file(path.c_str());
+				if (!file.good()) {
+				    std::cerr << "[μmax] Cannot open file '" << path
+				              << "' – using μmax = 1 for every model.\n";
+				    return;
+				}
+
+				std::string header;
+				std::getline(file, header);             // salta header
+
+				std::string line;
+				std::size_t valid = 0;
+				while (std::getline(file, line)) {
+				    if (line.empty()) continue;
+
+				    std::istringstream ss(line);
+				    std::string model, muStr;
+				    std::getline(ss, model, ',');
+				    std::getline(ss, muStr, ',');
+
+				    if (model.empty() || muStr.empty()) continue;
+
+				    double mu;
+				    try { mu = std::stod(muStr); }
+				    catch (...) {
+				        std::cerr << "[μmax] Warning: mu_max non numerico per modello '"
+				                  << model << "'\n";
+				        continue;
+				    }
+
+				    std::size_t idx = findLPIndex(vec_fluxb, model);
+				    if (idx == std::numeric_limits<std::size_t>::max()) {
+				        std::cerr << "[μmax] Warning: modello '" << model
+				                  << "' non trovato fra i LP – skip\n";
+				        continue;
+				    }
+
+				    muMaxMap[idx] = mu;
+				    ++valid;
+				}
+				file.close();
+
+				if (valid == 0) {
+				    std::cerr << "[μmax] File '" << path
+				              << "' vuoto o senza righe valide – μmax = 1 per tutti i modelli.\n";
+				} else {
+				    std::cout << "[μmax] Loaded " << valid
+				              << " μmax value(s) from '" << path << "'.\n";
+				}
+		}
+
 };

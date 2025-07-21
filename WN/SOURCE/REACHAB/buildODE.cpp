@@ -1024,10 +1024,16 @@ for (pp = 0; pp < npl; pp++)
         exit(EXIT_FAILURE);
     }
     hout << "namespace SDE {\n";
-    for (int i = 0; i < npl; i++)
-    {
-        hout << "#define " << tabp[i].place_name << "_place " << i<<endl;
-    }
+		for (int i = 0; i < npl; ++i) {
+				std::string macroName(tabp[i].place_name);
+				if (!macroName.empty() &&
+				    std::isdigit(static_cast<unsigned char>(macroName.front())))
+				{
+				    macroName.insert(0, 1, '_');   // o macroName = "_" + macroName;
+				}
+				hout << "#define " << macroName << "_place " << i << '\n';
+		}
+
     set<std::string> function_names;
     for (int tt = 0; tt < ntr; tt++)
     {
