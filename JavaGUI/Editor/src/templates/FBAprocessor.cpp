@@ -104,9 +104,9 @@ class FBAProcessor {
 				    }
 				}
 
-					bool newStep = std::fabs(time - stepTime) > tol;          
-					if (newStep && std::fabs(time - lastSolvedTime) < minDtFBA)
-							newStep = false;                                     
+					bool newStep = std::isnan(stepTime) || (std::fabs(time - stepTime) > tol);
+					if (newStep && !std::isnan(lastSolvedTime) && std::fabs(time - lastSolvedTime) < minDtFBA)
+							newStep = false;                              
 
 					if (newStep) {
 
@@ -155,10 +155,12 @@ class FBAProcessor {
 
 							std::cout << "[DEBUG newStep] ◀ Exiting FBA update block\n\n";
 					} else {
-				    std::cout << "[DEBUG process] time " << time 
-				              << " ≤ lastFbaTime " << lastFbaTime 
-				              << " → skipping all FBA updates\n";
-				}
+							std::cout << "[DEBUG process] Skipping FBA updates "
+										    << "(newStep=" << std::boolalpha << newStep
+										    << ", stepTime=" << stepTime
+										    << ", lastSolvedTime=" << lastSolvedTime << ")\n";
+					}
+
 
 				// --- calcolo il rate per la sola transizione T ---
 				size_t problemIndex = FBAproblems[ NameTrans[T] ];
