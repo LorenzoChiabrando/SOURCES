@@ -104,45 +104,57 @@ class FBAProcessor {
 				    }
 				}
 
-				// --- solo se time è avanzato davvero ---
-				const double tol = 1e-12;
-				if (time > lastFbaTime + tol) {
-				    std::cout << "[DEBUG process] Time advanced from "
-				              << lastFbaTime << " to " << time << " → checking updates\n";
-				    lastFbaTime = time;
+					bool newStep = std::fabs(time - stepTime) > tol;          
+					if (newStep && std::fabs(time - lastSolvedTime) < minDtFBA)
+							newStep = false;                                     
 
-				    // 1) trovo quali posti sono cambiati (metaboliti + biomassa)
-				    auto changed = checkSignificantChange(Value, NumPlaces, time);
-				    if (changed.empty()) {
-				        std::cout << "[DEBUG process] No significant changes → skipping FBA\n";
-				    }
-				    else {
-				        // 2) preparo la lista di reazioni da aggiornare
-				        reactionsToUpdate.clear();
-				        for (auto& met : changed) {
-				            auto it = metaboliteToReactions.find(met);
-				            if (it != metaboliteToReactions.end()) {
-				                for (auto& rxn : it->second)
-				                    reactionsToUpdate.insert(rxn);
-				            }
-				        }
-				        // 3) se c'è la biomassa nei changed, aggiorno i bound di crescita
-				        for (auto& bioPlace : problemBiomassPlace) {
-				            const string& placeName = bioPlace.second;
-				            if (changed.count(placeName)) {
-				                std::cout << "[DEBUG process] Biomass place '" 
-				                          << placeName << "' changed → updateAllBiomass\n";
-				                updateAllBiomassReactionsUpperBounds(Value, NumPlaces, vec_fluxb);
-				                break;
-				            }
-				        }
-				        // 4) e infine aggiorno gli EX_ e le non‑FBA solo per reactionsToUpdate
-				        std::cout << "[DEBUG process] updateFluxBoundsAndSolve for "
-				                  << reactionsToUpdate.size() << " reactions\n";
-				        updateFluxBoundsAndSolve(Value, vec_fluxb, NumPlaces, time);
-				    }
-				}
-				else {
+					if (newStep) {
+
+							std::cout << "[DEBUG newStep] ▶ Entering FBA update block at time = " << time
+										    << " (previous stepTime = " << stepTime << ")\n";
+
+							stepTime       = time;
+							lastSolvedTime = time; 
+
+							auto changed = checkSignificantChange(Value, NumPlaces, time);
+							std::cout << "[DEBUG newStep]   changed metabolites (" << changed.size() << "): ";
+							for (const auto& m : changed) std::cout << m << ", ";
+							std::cout << "\n";
+
+							reactionsToUpdate.clear();
+							for (auto& met : changed) {
+									auto it = metaboliteToReactions.find(met);
+									if (it != metaboliteToReactions.end()) {
+										  for (auto& rxn : it->second)
+										      reactionsToUpdate.insert(rxn);
+									}
+							}
+							std::cout << "[DEBUG newStep]   reactionsToUpdate size = "
+										    << reactionsToUpdate.size() << "\n";
+
+							bool bioUpdated = false;
+							for (auto& bioPlace : problemBiomassPlace) {
+									if (changed.count(bioPlace.second)) {
+										  std::cout << "[DEBUG newStep]   Biomass place '"
+										            << bioPlace.second << "' changed → updating biomass bounds\n";
+										  updateAllBiomassReactionsUpperBounds(Value, NumPlaces, vec_fluxb);
+										  bioUpdated = true;
+										  break;
+									}
+							}
+							if (!bioUpdated) {
+									std::cout << "[DEBUG newStep]   No biomass update needed\n";
+							}
+
+							std::cout << "[DEBUG newStep]   Calling updateFluxBoundsAndSolve …\n";
+							updateFluxBoundsAndSolve(Value, vec_fluxb, NumPlaces, time);
+							std::cout << "[DEBUG newStep]   Returned from updateFluxBoundsAndSolve\n";
+
+							updateConcentrations(Value, NumPlaces, changed);
+							std::cout << "[DEBUG newStep]   Previous concentrations updated\n";
+
+							std::cout << "[DEBUG newStep] ◀ Exiting FBA update block\n\n";
+					} else {
 				    std::cout << "[DEBUG process] time " << time 
 				              << " ≤ lastFbaTime " << lastFbaTime 
 				              << " → skipping all FBA updates\n";
@@ -170,6 +182,12 @@ class FBAProcessor {
 
 
 		private:
+		
+		/* -------------- Simulation (ODE + FBA) parameters (used for efficent update of fba bounds) -------------- */
+		double stepTime       = std::numeric_limits<double>::quiet_NaN(); 
+		double lastSolvedTime = std::numeric_limits<double>::quiet_NaN(); 
+		const  double tol     = 1e-12;     
+		const  double minDtFBA = 0.0;       
 		
 		double lastFbaTime = std::numeric_limits<double>::lowest();
 		// place → set di reactionName che lo coinvolgono
