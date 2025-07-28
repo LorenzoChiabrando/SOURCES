@@ -37,8 +37,8 @@ namespace SDE {
 
 
 //Chiabrando
-double g_absEpsilon;  
-double g_relEpsilon; 
+double g_absEpsilon;   // di default 0
+double g_relEpsilon;  // di default -1
 
 //long int seed = std::chrono::high_resolution_clock::now().time_since_epoch().count();
 

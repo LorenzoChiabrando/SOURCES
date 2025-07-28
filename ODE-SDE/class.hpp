@@ -139,6 +139,10 @@
 #endif
 
 
+#ifndef __CCTYPE_H__
+#define __CCTYPE_H__
+#include <cctype>
+#endif
 
 
 #ifndef __REVERSE_HEAP_H__

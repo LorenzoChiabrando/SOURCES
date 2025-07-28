@@ -934,21 +934,36 @@ void LPprob::setColumnBounds(std::ifstream& in, general::Parser& parser, const c
                 forwardCount++; 
             }
         }
-        // -----------------------------------------------------------
-        // CASO 3: tutti gli altri (LB>=0 oppure LB=0 & UB>=0, etc.)
-        //         -> non splitted => 1 colonna invariata
-        // -----------------------------------------------------------
-        else 
-        {
-            newReactions.push_back(tmpReactions[c]);
-            newBoundType.push_back(tmpBoundType[c]);
-            newLb.push_back(LB);
-            newUb.push_back(UB);
+				// -----------------------------------------------------------
+				// CASO 3: LB>=0 & UB>0 OR LB==UB==0
+				// → sempre suffisso _f
+				// -----------------------------------------------------------
+				else {
+						// CASO 3A: blocked (LB==0 && UB==0)
+						if (LB == 0.0 && UB == 0.0) {
+								std::string fwdName = tmpReactions[c] + "_f";
+								newReactions.push_back(fwdName);
+								newBoundType .push_back(GLP_FX);
+								newLb        .push_back(0.0);
+								newUb        .push_back(0.0);
+								mapFwd[c] = newIndexCount;
+								mapRev[c] = -1;
+								newIndexCount++;
+						}
+						// CASO 3B: irreversibile-forward (LB>=0 && UB>0)
+						else {
+								std::string fwdName = tmpReactions[c] + "_f";
+								newReactions.push_back(fwdName);
+								newBoundType .push_back(tmpBoundType[c]);
+								newLb        .push_back(LB);
+								newUb        .push_back(UB);
+								mapFwd[c] = newIndexCount;
+								mapRev[c] = -1;
+								newIndexCount++;
+						}
+				}
 
-            mapFwd[c] = newIndexCount; // "fwd" coincide con la colonna singola
-            mapRev[c] = -1;
-            newIndexCount++;
-        }
+
     }
 		  
 		 // std::cout << "[finalizeLPAndSplit: " << fileProb << " ]" << "Reazioni aggiunte come forward (_f): " << forwardCount << std::endl;
@@ -1120,7 +1135,7 @@ void LPprob::setColumnBounds(std::ifstream& in, general::Parser& parser, const c
 		          break;
 		      }
 		  }
-			/*
+			
 			// Debug: stampa i contenuti di GeneAssocReactions
 			std::cout << "\n[DEBUG] GeneAssocReactions contents:" << std::endl;
 			for (const auto& pair : GeneAssocReactions) {
@@ -1146,8 +1161,8 @@ void LPprob::setColumnBounds(std::ifstream& in, general::Parser& parser, const c
 			}
 
 			std::cout << "[finalizeLPAndSplit] oldObjName = " << oldObjName 
-						    << " => new pFBA_index = " << pFBA_index << std::endl;*/
-			//debugPrintGLPKProblem(fileProb);
+						    << " => new pFBA_index = " << pFBA_index << std::endl;
+			debugPrintGLPKProblem(fileProb);
 	}
 
 	void LPprob::debugPrintGLPKProblem(const char* fileProb)

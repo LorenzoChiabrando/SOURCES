@@ -155,6 +155,7 @@ class FBAProcessor {
 
 							std::cout << "[DEBUG newStep] ◀ Exiting FBA update block\n\n";
 					} else {
+							std::cout << "Try debug\n" << endl;
 							std::cout << "[DEBUG process] Skipping FBA updates "
 										    << "(newStep=" << std::boolalpha << newStep
 										    << ", stepTime=" << stepTime

@@ -295,16 +295,35 @@ namespace FBGLPK {
 
 				// Update method for LP problem
 				void updateLP(const char * FileProb, int variability = 0, int typeOBJ = -1, const char* FluxName = "");
+				
+				/* TMP DEBUG */
+				void debugPrintObjectiveCoeffs() {
+						int ncols = glp_get_num_cols(lp);
+						cout << "\n[DEBUG OBJ] Printing non-zero objective coefficients:\n";
+						for (int col = 1; col <= ncols; ++col) {
+								double coeff = glp_get_obj_coef(lp, col); // coeff d’obiettivo per la colonna col
+								if (abs(coeff) > 1e-14) {
+								    // Nome della reazione corrispondente
+								    string rName = ReactionsNamesOrd[col - 1]; // col-1, perché ReactionsNamesOrd è 0-based
+								    cout << "  Col " << col 
+								              << " => Reaction '" << rName 
+								              << "', obj_coeff = " << coeff << endl;
+								}
+						}
+						std::cout << "----------------------------------------\n";
+				}
 				    //! Solves the LP problem using simplex method
 				void solve() {
 						// Inizializza i parametri del metodo del simplesso
+						
+						
 						glp_smcp param;
 						glp_init_smcp(&param);
 
 						// 1) Imposta il livello di messaggi (per debugging). 
 						//    Può essere: GLP_MSG_OFF, GLP_MSG_ON, GLP_MSG_ERR, GLP_MSG_DBG, etc.
-						param.msg_lev = GLP_MSG_OFF; 
-
+						param.msg_lev = GLP_MSG_DBG; 
+glp_write_lp(lp, NULL, "myproblem.lp");
 						// 2) Attiva il presolve (opzionale, aiuta a ridurre il problema)
 					  //param.presolve = GLP_ON;
 
@@ -316,12 +335,26 @@ namespace FBGLPK {
 
 						// 4) Imposta eventualmente un limite sulle iterazioni (ad es. 1 milione)
 						//    Se GLPK supera questa soglia, interrompe e restituisce un codice di stato.
-						param.it_lim = 100000; // o un valore adeguato
+						//param.it_lim = 100000; // o un valore adeguato
 
 						// Esegui il solver
 						int status = glp_simplex(lp, &param);
+						cout << "DEBUG obj value: " <<  glp_get_obj_val(lp) << endl;
+						debugPrintObjectiveCoeffs();
+						int solverStatus = glp_get_status(lp);
+						switch(solverStatus) {
+							case GLP_OPT:    std::cout << "[DEBUG] Solver status = OPTIMAL.\n";    break;
+							case GLP_FEAS:   std::cout << "[DEBUG] Solver status = FEASIBLE.\n";   break;
+							case GLP_INFEAS: std::cout << "[DEBUG] Solver status = INFEASIBLE.\n"; break;
+							case GLP_NOFEAS: std::cout << "[DEBUG] Solver status = NOFEAS.\n";     break;
+							case GLP_UNBND:  std::cout << "[DEBUG] Solver status = UNBOUNDED.\n";  break;
+							case GLP_UNDEF:  std::cout << "[DEBUG] Solver status = UNDEFINED.\n";  break;
+							default:         std::cout << "[DEBUG] nessuno.\n";                    break;
+						}
 
-						// Controlla se la soluzione è stata trovata
+
+
+
 						if (status == 0) {
 								solved = true;
 						} else {
@@ -341,9 +374,8 @@ namespace FBGLPK {
 								}
 						}
 				}
-
-
-
+				
+				/**/
 
         //! Handles solution variability
         void solveVariability();
@@ -383,11 +415,22 @@ namespace FBGLPK {
             return LB;
         };
 
-        //! Returns the upper bound for a specified variable
-        inline double getUpBounds(int indexR){
-	    			double UB = glp_get_col_ub(lp, indexR);
-            return UB;
-        };
+inline double getUpBounds(int indexR){
+    // Otteniamo tipo, lower e upper bound
+    int    type = glp_get_col_type(lp, indexR);
+    double lb   = glp_get_col_lb  (lp, indexR);
+    double ub   = glp_get_col_ub  (lp, indexR);
+
+   /* // Log completo in tutti gli altri casi
+    std::cout << "[DEBUG getUpBounds] col=" << indexR
+              << " TYPE=" << type
+              << ", lb=" << lb
+              << ", ub=" << ub
+              << std::endl;*/
+
+    return ub;
+}
+
 
         //! Prints the last GLPK solution to standard output
         void print(){
@@ -457,15 +500,36 @@ namespace FBGLPK {
         }
 
         //! Updates the bounds for a specified variable
-        inline void update_bound(int indexR, string TypeBound, double Lb, double Ub){
-            glp_set_col_bnds(lp, indexR, setTypeBound(TypeBound) , Lb, Ub);
-           // cout<<"Bounds of "<< indexR <<" is updated as: ["<<Lb<<";"<<Ub<<"]"<<endl;
-        };
 
-        inline void update_bound(int indexR, int TypeBound, double Lb, double Ub){
-            glp_set_col_bnds(lp, indexR, TypeBound , Lb, Ub);          
-            //cout<<"Bounds of "<< indexR <<" is updated as: ["<<Lb<<";"<<Ub<<"]"<<endl;         
-        };
+inline void update_bound(int indexR, const std::string& TypeBound, double Lb, double Ub) {
+    glp_set_col_bnds(lp, indexR, setTypeBound(TypeBound), Lb, Ub);
+
+    int      nReacts      = static_cast<int>(ReactionsNamesOrd.size());
+    std::string reactionName = (indexR >= 1 && indexR <= nReacts)
+        ? ReactionsNamesOrd[indexR - 1]
+        : "<unknown>";
+
+    /*std::cout
+      << "[DEBUG][update_bound] reaction='" << reactionName
+      << "' (col=" << indexR << "), TypeBound='" << TypeBound
+      << "', new bounds = [" << Lb << ";" << Ub << "]"
+      << std::endl;*/
+}
+
+inline void update_bound(int indexR, int TypeBound, double Lb, double Ub) {
+    glp_set_col_bnds(lp, indexR, TypeBound, Lb, Ub);
+
+    int      nReacts      = static_cast<int>(ReactionsNamesOrd.size());
+    std::string reactionName = (indexR >= 1 && indexR <= nReacts)
+        ? ReactionsNamesOrd[indexR - 1]
+        : "<unknown>";
+
+    /*std::cout
+      << "[DEBUG][update_bound] reaction='" << reactionName
+      << "' (col=" << indexR << "), TypeBound=" << TypeBound
+      << ", new bounds = [" << Lb << ";" << Ub << "]"
+      << std::endl;*/
+}
         
 				/**
 				 * @brief Getter method to retrieve the filename of the LP problem.
