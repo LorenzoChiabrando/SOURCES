@@ -1736,7 +1736,7 @@ if (!bacteriaBiomassPlace.empty() && bacteriaBiomassPlace != "N/A") {
 				}
 				file.close();
 				std::cout << "[DEBUG NonFBARead] Finished parsing CSV, dumping debug CSV\n";
-
+/*
 				// Genera il CSV di debug
 				if (!debugRows.empty()) {
 				    std::ofstream dbg("debug_nonFBA_bounds.csv");
@@ -1752,7 +1752,7 @@ if (!bacteriaBiomassPlace.empty() && bacteriaBiomassPlace != "N/A") {
 				    std::cout << "[DEBUG NonFBARead] Debug CSV written: debug_nonFBA_bounds.csv\n";
 				} else {
 				    std::cout << "[DEBUG NonFBARead] No debug rows to write\n";
-				}
+				}*/
 		}
 		
 		/**
@@ -1912,7 +1912,7 @@ if (!bacteriaBiomassPlace.empty() && bacteriaBiomassPlace != "N/A") {
 				          << " projectedFBA reactions\n";
 
 				// 12) dump CSV di debug
-				if (!debugRows.empty()) {
+				/*if (!debugRows.empty()) {
 				    std::ofstream dbg("debug_FBA_projected_bounds.csv");
 				    dbg << "reaction,LPfile,conc,volume,new_upper_bound\n";
 				    for (auto &r : debugRows) {
@@ -1926,7 +1926,7 @@ if (!bacteriaBiomassPlace.empty() && bacteriaBiomassPlace != "N/A") {
 				    std::cout << "[DEBUG][FBA] Wrote debug_FBA_projected_bounds.csv\n";
 				} else {
 				    std::cout << "[DEBUG][FBA] No projected bounds to write\n";
-				}
+				}*/
 		}
 
 
@@ -1953,7 +1953,7 @@ if (!bacteriaBiomassPlace.empty() && bacteriaBiomassPlace != "N/A") {
 					using Row = std::tuple<std::string,std::string,double,double,double,double,double>;
 					std::vector<Row> dbg;
 
-					std::cout << "[DEBUG updateNonFBA] Starting dynamic update of non-projected bounds (_f & _r)\n";
+				//	std::cout << "[DEBUG updateNonFBA] Starting dynamic update of non-projected bounds (_f & _r)\n";
 
 					auto lpListFor = [&](const std::string& rxn){
 						  std::vector<std::size_t> v;
@@ -1974,19 +1974,19 @@ if (!bacteriaBiomassPlace.empty() && bacteriaBiomassPlace != "N/A") {
 					for (const auto& rxn : allRxn) {
 						  // 1) skip solo le reverse FBA (_r) — forward FBA (_f) **vengono** elaborate qui
 						  if (FBAreactions.count(rxn) && endsWith(rxn, "_r")) {
-						      std::cout << "[DEBUG updateNonFBA] Skipping reverse FBA-bound: " << rxn << "\n";
+						     // std::cout << "[DEBUG updateNonFBA] Skipping reverse FBA-bound: " << rxn << "\n";
 						      continue;
 						  }
 						  // 2) skip le biomassa non-FBA / FBA
 						  if (rxn == "EX_biomass_e_f" || rxn == "EX_biomass_e_r") {
-						      std::cout << "[DEBUG updateNonFBA] Skipping biomass reaction: " << rxn << "\n";
+						    //  std::cout << "[DEBUG updateNonFBA] Skipping biomass reaction: " << rxn << "\n";
 						      continue;
 						  }
 
-						  std::cout << "[DEBUG updateNonFBA] Processing reaction: " << rxn << "\n";
+						//  std::cout << "[DEBUG updateNonFBA] Processing reaction: " << rxn << "\n";
 						  auto lpIdxList = lpListFor(rxn);
 						  if (lpIdxList.empty()) {
-						      std::cout << "[DEBUG updateNonFBA]   No LPs found for " << rxn << "\n";
+						  //    std::cout << "[DEBUG updateNonFBA]   No LPs found for " << rxn << "\n";
 						      continue;
 						  }
 
@@ -1996,13 +1996,13 @@ if (!bacteriaBiomassPlace.empty() && bacteriaBiomassPlace != "N/A") {
 						  std::string subtype = ReactionSubtype.count(key0)
 						                        ? ReactionSubtype[key0]
 						                        : "exchange";
-						  std::cout << "[DEBUG updateNonFBA]   baseUb C_m=" << C_m
-						            << ", subtype=" << subtype << "\n";
+						  //std::cout << "[DEBUG updateNonFBA]   baseUb C_m=" << C_m
+						   //         << ", subtype=" << subtype << "\n";
 
 						  // calcola λ sommando su tutti i LP (exchange) o solo sul primo (internal)
 						  double denom = 0.0;
 						  if (subtype == "exchange") {
-						      std::cout << "[DEBUG updateNonFBA]   exchange: sum pop·biomass\n";
+						     // std::cout << "[DEBUG updateNonFBA]   exchange: sum pop·biomass\n";
 						      for (auto idx : lpIdxList) {
 						          double pop = problemBacteriaPlace.count(idx)
 						                       ? std::floor(Value[ NumPlaces.at(problemBacteriaPlace[idx]) ])
@@ -2011,10 +2011,10 @@ if (!bacteriaBiomassPlace.empty() && bacteriaBiomassPlace != "N/A") {
 						                       ? trunc(Value[ NumPlaces.at(problemBiomassPlace[idx]) ], decimalTrunc)
 						                       : 1.0;
 						          double contrib = pop * biomass * 1e-12;
-						          std::cout << "[DEBUG updateNonFBA]     LP#" << idx
+						       /*   std::cout << "[DEBUG updateNonFBA]     LP#" << idx
 						                    << ": pop=" << pop
 						                    << ", biomass=" << biomass
-						                    << " → contrib=" << contrib << "\n";
+						                    << " → contrib=" << contrib << "\n";*/
 						          denom += contrib;
 						      }
 						  } else {
@@ -2026,15 +2026,15 @@ if (!bacteriaBiomassPlace.empty() && bacteriaBiomassPlace != "N/A") {
 						                   ? trunc(Value[ NumPlaces.at(problemBiomassPlace[idx]) ], decimalTrunc)
 						                   : 1.0;
 						      denom = pop * biomass * 1e-12;
-						      std::cout << "[DEBUG updateNonFBA]   internal LP#" << idx
+						     /* std::cout << "[DEBUG updateNonFBA]   internal LP#" << idx
 						                << ": pop=" << pop
 						                << ", biomass=" << biomass
-						                << " → denom=" << denom << "\n";
+						                << " → denom=" << denom << "\n";*/
 						  }
 
 						  double lambda = denom > 0.0 ? 1.0/denom : 0.0;
-						  std::cout << "[DEBUG updateNonFBA]   Total denom=" << denom
-						            << " → lambda=" << lambda << "\n";
+						  //std::cout << "[DEBUG updateNonFBA]   Total denom=" << denom
+						  //          << " → lambda=" << lambda << "\n";
 
 						  // applichiamo il bound dinamico sia alle forward (_f) che alle reverse (_r) non-FBA
 						  // e alle forward FBA (_f), perché qui abbiamo tolto il filtro su projectFBA _f
@@ -2043,15 +2043,15 @@ if (!bacteriaBiomassPlace.empty() && bacteriaBiomassPlace != "N/A") {
 						      if (col < 0) continue;
 						      double oldUb = vec_fluxb[idx].getUpBounds(col);
 						      double newUb = C_m * lambda;
-						      std::cout << "[DEBUG updateNonFBA]   LP#" << idx
+						     /* std::cout << "[DEBUG updateNonFBA]   LP#" << idx
 						                << ": oldUb=" << oldUb
-						                << ", newUb=" << newUb << "\n";
+						                << ", newUb=" << newUb << "\n";*/
 						      if (newUb <= 0.0) {
-						          std::cout << "[DEBUG updateNonFBA]     Setting GLP_FX 0\n";
+						         // std::cout << "[DEBUG updateNonFBA]     Setting GLP_FX 0\n";
 						          vec_fluxb[idx].update_bound(col, "GLP_FX", 0.0, 0.0);
 						      } else {
-						          std::cout << "[DEBUG updateNonFBA]     Setting GLP_DB [0," 
-						                    << trunc(newUb,decimalTrunc) << "]\n";
+						         // std::cout << "[DEBUG updateNonFBA]     Setting GLP_DB [0," 
+						          //          << trunc(newUb,decimalTrunc) << "]\n";
 						          vec_fluxb[idx].update_bound(col, "GLP_DB", 0.0, trunc(newUb,decimalTrunc));
 						      }
 						      dbg.emplace_back(
@@ -2070,7 +2070,7 @@ if (!bacteriaBiomassPlace.empty() && bacteriaBiomassPlace != "N/A") {
 						  }
 					}
 
-					std::cout << "[DEBUG updateNonFBA] Writing CSV 'debug_nonFBA_runtime_bounds.csv'\n";
+				/*	std::cout << "[DEBUG updateNonFBA] Writing CSV 'debug_nonFBA_runtime_bounds.csv'\n";
 					std::ofstream out("debug_nonFBA_runtime_bounds.csv");
 					out << "reaction,LPfile,pop,biomass,Cm(oldBase),oldUB,newUB\n";
 					for (auto& r : dbg) {
@@ -2081,9 +2081,9 @@ if (!bacteriaBiomassPlace.empty() && bacteriaBiomassPlace != "N/A") {
 						      << std::get<4>(r) << ','
 						      << std::get<5>(r) << ','
 						      << std::get<6>(r) << '\n';
-					}
-					out.close();
-					std::cout << "[DEBUG updateNonFBA] Dynamic update complete\n";
+					}*/
+					//out.close();
+					//std::cout << "[DEBUG updateNonFBA] Dynamic update complete\n";
 			}
 
 
@@ -2249,36 +2249,36 @@ if (!bacteriaBiomassPlace.empty() && bacteriaBiomassPlace != "N/A") {
 				}
 		}
 		
-// 1) Debug‐enhanced mapMetabolitesToReactions()
-//    Call this right after you’ve built FBAplace (in init_data_structures_class).
-void mapMetabolitesToReactions() {
-    metaboliteToReactions.clear();
-    std::cout << "[DEBUG mapMetabolitesToReactions] FBAplace size = " 
-              << FBAplace.size() << "\n";
+		// 1) Debug‐enhanced mapMetabolitesToReactions()
+		//    Call this right after you’ve built FBAplace (in init_data_structures_class).
+		void mapMetabolitesToReactions() {
+				metaboliteToReactions.clear();
+				std::cout << "[DEBUG mapMetabolitesToReactions] FBAplace size = " 
+				          << FBAplace.size() << "\n";
 
-    for (const auto &kv : FBAplace) {
-        const std::string &reaction  = kv.first;
-        const std::string &placesStr = kv.second;
-        auto places = splitAndTrim(placesStr, ',');
+				for (const auto &kv : FBAplace) {
+				    const std::string &reaction  = kv.first;
+				    const std::string &placesStr = kv.second;
+				    auto places = splitAndTrim(placesStr, ',');
 
-        std::cout << "[DEBUG mapMetabolitesToReactions] reaction = " 
-                  << reaction << " → places: ";
-        for (auto &p : places) std::cout << p << ", ";
-        std::cout << "\n";
+				    std::cout << "[DEBUG mapMetabolitesToReactions] reaction = " 
+				              << reaction << " → places: ";
+				    for (auto &p : places) std::cout << p << ", ";
+				    std::cout << "\n";
 
-        for (auto &p : places) {
-            metaboliteToReactions[p].insert(reaction);
-        }
-    }
+				    for (auto &p : places) {
+				        metaboliteToReactions[p].insert(reaction);
+				    }
+				}
 
-    // print summary
-    std::cout << "[DEBUG metaboliteToReactions] summary:\n";
-    for (const auto &kv : metaboliteToReactions) {
-        std::cout << "  metabolite " << kv.first << " → reactions: ";
-        for (auto &r : kv.second) std::cout << r << ", ";
-        std::cout << "\n";
-    }
-}
+				// print summary
+				std::cout << "[DEBUG metaboliteToReactions] summary:\n";
+				for (const auto &kv : metaboliteToReactions) {
+				    std::cout << "  metabolite " << kv.first << " → reactions: ";
+				    for (auto &r : kv.second) std::cout << r << ", ";
+				    std::cout << "\n";
+				}
+		}
 
 
 
